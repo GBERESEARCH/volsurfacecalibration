@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import '../styles/volSurface.css';
 
 const RatesAndDividendsForm = ({ 
@@ -9,11 +9,11 @@ const RatesAndDividendsForm = ({
   onRepoRatesChange, 
   onDividendsChange 
 }) => {
-  const discountDefault = 4.5
-  const repoDefault = 1.0
-  const divDefault = 1.21
+  const discountDefault = 4.5;
+  const repoDefault = 1.0;
+  const divDefault = 1.21;
 
-  // State for detailed date-specific entries
+  // State for detailed mode
   const [newDiscountDate, setNewDiscountDate] = useState('');
   const [newDiscountRate, setNewDiscountRate] = useState('');
   
@@ -23,57 +23,52 @@ const RatesAndDividendsForm = ({
   const [newDividendDate, setNewDividendDate] = useState('');
   const [newDividendAmount, setNewDividendAmount] = useState('');
   
-  // State for simple mode with single rates
-  const [useSimpleMode, setUseSimpleMode] = useState(true); // Set simple mode as default
-  const [singleDiscountRate, setSingleDiscountRate] = useState(discountDefault);
-  const [singleRepoRate, setSingleRepoRate] = useState(repoDefault);
-  const [annualDividendYield, setAnnualDividendYield] = useState(divDefault);
+  // State for simple mode - using localStorage to persist values
+  const [useSimpleMode, setUseSimpleMode] = useState(true);
+  
+  // Initialize with localStorage values or defaults
+  const [singleDiscountRate, setSingleDiscountRate] = useState(() => {
+    const savedValue = localStorage.getItem('singleDiscountRate');
+    return savedValue !== null ? parseFloat(savedValue) : discountDefault;
+  });
+  
+  const [singleRepoRate, setSingleRepoRate] = useState(() => {
+    const savedValue = localStorage.getItem('singleRepoRate');
+    return savedValue !== null ? parseFloat(savedValue) : repoDefault;
+  });
+  
+  const [annualDividendYield, setAnnualDividendYield] = useState(() => {
+    const savedValue = localStorage.getItem('annualDividendYield');
+    return savedValue !== null ? parseFloat(savedValue) : divDefault;
+  });
+  
+  // Save values to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('singleDiscountRate', singleDiscountRate);
+  }, [singleDiscountRate]);
+  
+  useEffect(() => {
+    localStorage.setItem('singleRepoRate', singleRepoRate);
+  }, [singleRepoRate]);
+  
+  useEffect(() => {
+    localStorage.setItem('annualDividendYield', annualDividendYield);
+  }, [annualDividendYield]);
   
   // Handler for switching between detailed and simple mode
   const handleModeChange = (mode) => {
     setUseSimpleMode(mode === 'simple');
-    
-    if (mode === 'simple') {
-      // Set single rates based on the average of existing rates or defaults
-      // Convert from decimal to percentage for display
-      let avgDiscountRate = discountDefault; // Default 5%
-      let avgRepoRate = repoDefault; // Default 1%
-      let avgDividendYield = divDefault; // Default 2%
-      
-      if (Object.values(discountRates).length > 0) {
-        avgDiscountRate = (Object.values(discountRates).reduce((sum, rate) => sum + rate, 0) / 
-          Object.values(discountRates).length * 100).toFixed(5);
-      }
-      
-      if (Object.values(repoRates).length > 0) {
-        avgRepoRate = (Object.values(repoRates).reduce((sum, rate) => sum + rate, 0) / 
-          Object.values(repoRates).length * 100).toFixed(5);
-      }
-      
-      // For dividend yield, we would need more complex logic, so just use default
-      // if there are existing dividends
-      if (dividends && Object.keys(dividends).length > 0) {
-        // This is a simplified approximation of annual yield
-        const totalDividends = Object.values(dividends).reduce((sum, amount) => sum + amount, 0);
-        avgDividendYield = (totalDividends * 4 * 100).toFixed(5); // Assuming quarterly
-      }
-      
-      setSingleDiscountRate(avgDiscountRate);
-      setSingleRepoRate(avgRepoRate);
-      setAnnualDividendYield(avgDividendYield);
-    }
   };
   
-  // Apply single rates to all dates
+  // Apply single rates to all dates - completely separate from detailed mode
   const applySimpleRates = () => {
-    // Get all unique dates from existing entries
-    const allDates = [...new Set([
-      ...Object.keys(discountRates),
-      ...Object.keys(repoRates)
-    ])];
+    console.log('Applying simple mode rates:');
+    console.log(`Discount rate: ${singleDiscountRate}%`);
+    console.log(`Repo rate: ${singleRepoRate}%`);
+    console.log(`Dividend yield: ${annualDividendYield}%`);
     
-    // If no dates exist, add some default future dates
-    const datesToUse = allDates.length > 0 ? allDates : [
+    // Create some default future dates if none exist
+    const datesToUse = [
       new Date(new Date().setMonth(new Date().getMonth() + 3)).toISOString().split('T')[0],
       new Date(new Date().setMonth(new Date().getMonth() + 6)).toISOString().split('T')[0],
       new Date(new Date().setMonth(new Date().getMonth() + 9)).toISOString().split('T')[0],
@@ -95,10 +90,9 @@ const RatesAndDividendsForm = ({
     });
     
     // For dividends, calculate quarterly payments based on annual yield
+    const newDividends = {};
     if (dividendYieldDecimal > 0) {
-      const newDividends = {};
       // Calculate quarterly dividend amount based on yield
-      // This is a simplification - in reality, would use spot price and other factors
       const quarterlyAmount = dividendYieldDecimal / 4;
       
       // Add quarterly dividend dates for the next year
@@ -108,12 +102,15 @@ const RatesAndDividendsForm = ({
         const dateStr = dividendDate.toISOString().split('T')[0];
         newDividends[dateStr] = quarterlyAmount;
       }
-      
-      onDividendsChange(newDividends);
     }
     
+    // Update Redux state - ensure this happens!
     onDiscountRatesChange(newDiscountRates);
     onRepoRatesChange(newRepoRates);
+    onDividendsChange(newDividends);
+    
+    // Show success message
+    alert('Rates applied successfully!');
   };
   
   // Handlers for detailed mode
@@ -121,7 +118,7 @@ const RatesAndDividendsForm = ({
     if (newDiscountDate && newDiscountRate) {
       const updatedRates = {
         ...discountRates,
-        [newDiscountDate]: parseFloat(newDiscountRate)
+        [newDiscountDate]: parseFloat(newDiscountRate) / 100 // Convert from percentage to decimal
       };
       onDiscountRatesChange(updatedRates);
       setNewDiscountDate('');
@@ -133,7 +130,7 @@ const RatesAndDividendsForm = ({
     if (newRepoDate && newRepoRate) {
       const updatedRates = {
         ...repoRates,
-        [newRepoDate]: parseFloat(newRepoRate)
+        [newRepoDate]: parseFloat(newRepoRate) / 100 // Convert from percentage to decimal
       };
       onRepoRatesChange(updatedRates);
       setNewRepoDate('');
@@ -169,6 +166,12 @@ const RatesAndDividendsForm = ({
     const updatedDividends = {...dividends};
     delete updatedDividends[date];
     onDividendsChange(updatedDividends);
+  };
+  
+  // Helper to format rates for display in detailed mode
+  const formatRateForDisplay = (rate) => {
+    // Convert from decimal to percentage for display
+    return (rate * 100).toFixed(2);
   };
   
   return (
@@ -255,7 +258,7 @@ const RatesAndDividendsForm = ({
           </div>
         </div>
       ) : (
-        /* Detailed Mode - Original implementation */
+        /* Detailed Mode */
         <>
           {/* Discount Rates */}
           <div className="form-group">
@@ -273,15 +276,18 @@ const RatesAndDividendsForm = ({
                   />
                 </div>
                 <div>
-                  <input
-                    type="number"
-                    value={newDiscountRate}
-                    onChange={(e) => setNewDiscountRate(e.target.value)}
-                    className="form-input"
-                    placeholder="Rate"
-                    step="0.001"
-                    style={{ width: '100px' }}
-                  />
+                  <div className="input-with-unit">
+                    <input
+                      type="number"
+                      value={newDiscountRate}
+                      onChange={(e) => setNewDiscountRate(e.target.value)}
+                      className="form-input"
+                      placeholder="Rate"
+                      step="0.01"
+                      style={{ width: '100px' }}
+                    />
+                    <span className="input-unit">%</span>
+                  </div>
                 </div>
                 <button
                   onClick={handleAddDiscountRate}
@@ -306,7 +312,7 @@ const RatesAndDividendsForm = ({
                     {Object.entries(discountRates).map(([date, rate]) => (
                       <tr key={date}>
                         <td>{date}</td>
-                        <td>{rate}</td>
+                        <td>{formatRateForDisplay(rate)}%</td>
                         <td>
                           <button
                             onClick={() => handleRemoveDiscountRate(date)}
@@ -341,15 +347,18 @@ const RatesAndDividendsForm = ({
                   />
                 </div>
                 <div>
-                  <input
-                    type="number"
-                    value={newRepoRate}
-                    onChange={(e) => setNewRepoRate(e.target.value)}
-                    className="form-input"
-                    placeholder="Rate"
-                    step="0.001"
-                    style={{ width: '100px' }}
-                  />
+                  <div className="input-with-unit">
+                    <input
+                      type="number"
+                      value={newRepoRate}
+                      onChange={(e) => setNewRepoRate(e.target.value)}
+                      className="form-input"
+                      placeholder="Rate"
+                      step="0.01"
+                      style={{ width: '100px' }}
+                    />
+                    <span className="input-unit">%</span>
+                  </div>
                 </div>
                 <button
                   onClick={handleAddRepoRate}
@@ -374,7 +383,7 @@ const RatesAndDividendsForm = ({
                     {Object.entries(repoRates).map(([date, rate]) => (
                       <tr key={date}>
                         <td>{date}</td>
-                        <td>{rate}</td>
+                        <td>{formatRateForDisplay(rate)}%</td>
                         <td>
                           <button
                             onClick={() => handleRemoveRepoRate(date)}

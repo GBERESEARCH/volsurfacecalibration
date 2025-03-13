@@ -12,6 +12,7 @@ import {
   updateDividends
 } from '../store/volSurfaceSlice';
 import VolatilitySurfaceVisualizer from './VolatilitySurfaceVisualizer';
+import OptionDiagnosticTable from './OptionDiagnosticTable';
 import MarketDataForm from './MarketDataForm';
 import OptionDataForm from './OptionDataForm';
 import RatesAndDividendsForm from './RatesAndDividendsForm';
@@ -29,6 +30,14 @@ const VolSurfaceDashboard = () => {
     status, 
     error 
   } = useSelector(state => state.volSurface);
+  
+  // Get diagnostic data from the store
+  const { 
+    diagnosticData, 
+    summary: diagnosticSummary,
+    status: diagnosticStatus,
+    error: diagnosticError
+  } = useSelector(state => state.diagnostics);
   
   const [activeTab, setActiveTab] = useState('options');
   
@@ -115,10 +124,12 @@ const VolSurfaceDashboard = () => {
           
           <button
             onClick={handleCalibrate}
-            disabled={status === 'loading'}
+            disabled={status === 'loading' || diagnosticStatus === 'loading'}
             className="btn btn--primary btn--full"
           >
-            {status === 'loading' ? 'Calibrating...' : 'Calibrate Volatility Surface'}
+            {status === 'loading' || diagnosticStatus === 'loading' 
+              ? 'Calibrating...' 
+              : 'Calibrate Volatility Surface'}
           </button>
           
           {error && (
@@ -127,25 +138,47 @@ const VolSurfaceDashboard = () => {
               <p className="m-0">{error}</p>
             </div>
           )}
-        </div>
-        
-        {/* Right Panel - Visualization */}
-        <div className="dashboard__visualization">
-          <h2 className="visualization-title">Volatility Surface</h2>
           
-          {status === 'loading' ? (
-            <div className="loader">
-              <div className="loader__spinner"></div>
-            </div>
-          ) : surfaceData ? (
-            <VolatilitySurfaceVisualizer surfaceData={surfaceData} />
-          ) : (
-            <div className="loader">
-              <p className="text-center">
-                Calibrate the volatility surface to view the 3D visualization
-              </p>
+          {diagnosticError && !error && (
+            <div className="alert alert--error">
+              <p className="m-0"><strong>Diagnostic Error</strong></p>
+              <p className="m-0">{diagnosticError}</p>
             </div>
           )}
+        </div>
+        
+        {/* Right Panel - Visualization and Diagnostics */}
+        <div className="dashboard__visualization">
+          {/* Surface Visualization */}
+          <div className="visualization-section">
+            <h2 className="visualization-title">Volatility Surface</h2>
+            
+            {status === 'loading' ? (
+              <div className="loader">
+                <div className="loader__spinner"></div>
+              </div>
+            ) : surfaceData ? (
+              <VolatilitySurfaceVisualizer surfaceData={surfaceData} />
+            ) : (
+              <div className="loader">
+                <p className="text-center">
+                  Calibrate the volatility surface to view the 3D visualization
+                </p>
+              </div>
+            )}
+          </div>
+          
+          {/* Diagnostic Table */}
+          {diagnosticStatus === 'loading' ? (
+            <div className="loader" style={{ height: '150px' }}>
+              <div className="loader__spinner"></div>
+            </div>
+          ) : diagnosticData && diagnosticData.length > 0 ? (
+            <OptionDiagnosticTable 
+              diagnosticData={diagnosticData} 
+              summary={diagnosticSummary} 
+            />
+          ) : null}
         </div>
       </div>
     </div>

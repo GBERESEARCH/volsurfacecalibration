@@ -121,16 +121,97 @@ async def validate_csv_data(data: OptionData) -> pd.DataFrame:
         rows_dropped_dates = initial_rows - len(df)
         if rows_dropped_dates > 0:
             print(f"Dropped {rows_dropped_dates} rows with invalid Last Trade Date")
-            
+        
+        # Modify the validate_csv_data function in main.py
+
+        # Replace this section in validate_csv_data:
+        # ...
         # Remove rows with invalid prices (NaN, None, negative, etc.)
-        rows_before_price_check = len(df)
-        df = df.dropna(subset=['Last Price', 'Bid', 'Ask'])
-        
+        # rows_before_price_check = len(df)
+        # df = df.dropna(subset=['Last Price', 'Bid', 'Ask'])
+        # 
         # Remove rows with zero or negative prices
-        df = df[(df['Last Price'] > 0) & (df['Bid'] > 0) & (df['Ask'] > 0)]
-        
+        # df = df[(df['Last Price'] > 0) & (df['Bid'] > 0) & (df['Ask'] > 0)]
+        # 
         # Check if Ask > Bid (market sanity check)
-        df = df[df['Ask'] >= df['Bid']]
+        # df = df[df['Ask'] >= df['Bid']]
+        # ...
+
+        # With this improved version:
+        # Improved price validation that allows options with some zero prices
+        rows_before_price_check = len(df)
+
+        # Keep track of which price type we're using
+        price_column_map = {
+            'bid': 'Bid',
+            'ask': 'Ask',
+            'mid': 'Mid',
+            'last': 'Last Price'
+        }
+        preferred_column = price_column_map.get(data.price_type.lower(), 'Mid')
+
+        # First, make sure the specified price type is valid
+        if preferred_column not in df.columns:
+            # If preferred column doesn't exist, look for alternatives
+            available_price_columns = [col for col in ['Last Price', 'Bid', 'Ask', 'Mid'] if col in df.columns]
+            if not available_price_columns:
+                raise HTTPException(status_code=400, detail=f"No price columns found in the data.")
+            preferred_column = available_price_columns[0]
+            print(f"Preferred price type '{data.price_type}' not available. Using '{preferred_column}' instead.")
+
+        # Remove rows where the preferred price column is invalid
+        df = df.dropna(subset=[preferred_column])
+        df = df[df[preferred_column] > 0]
+
+        # For 'mid' price type, we need special handling
+        if preferred_column == 'Mid':
+            # If Mid is directly provided, use it
+            if 'Mid' in df.columns:
+                pass
+            # Otherwise, calculate it from Bid and Ask
+            elif 'Bid' in df.columns and 'Ask' in df.columns:
+                # Remove rows with NaN in both Bid and Ask
+                df = df.dropna(subset=['Bid', 'Ask'], how='all')
+                
+                # Fill NaN values with existing values or zeros
+                df['Bid'] = df['Bid'].fillna(0)
+                df['Ask'] = df['Ask'].fillna(0)
+                
+                # Apply market sanity check only when both Bid and Ask are non-zero
+                valid_market = (df['Bid'] == 0) | (df['Ask'] == 0) | (df['Ask'] >= df['Bid'])
+                df = df[valid_market]
+                
+                # Calculate Mid when possible, otherwise use the available price
+                df['Mid'] = df.apply(
+                    lambda row: (row['Bid'] + row['Ask']) / 2 if row['Bid'] > 0 and row['Ask'] > 0 
+                    else row['Ask'] if row['Ask'] > 0 
+                    else row['Bid'] if row['Bid'] > 0
+                    else 0, 
+                    axis=1
+                )
+                
+                # Keep only rows with valid Mid
+                df = df[df['Mid'] > 0]
+            else:
+                # If we can't calculate Mid, use another price
+                for alt_col in ['Last Price', 'Bid', 'Ask']:
+                    if alt_col in df.columns:
+                        df = df.dropna(subset=[alt_col])
+                        df = df[df[alt_col] > 0]
+                        print(f"No Bid/Ask to calculate Mid, using {alt_col} instead.")
+                        break
+        else:
+            # For non-Mid prices, only apply the market sanity check 
+            # when both Bid and Ask are non-zero
+            if 'Bid' in df.columns and 'Ask' in df.columns:
+                has_both_prices = (df['Bid'] > 0) & (df['Ask'] > 0)
+                valid_prices = ~has_both_prices | (df['Ask'] >= df['Bid'])
+                df = df[valid_prices]
+
+        # Report how many rows were removed
+        rows_removed_prices = rows_before_price_check - len(df)
+        if rows_removed_prices > 0:
+            print(f"Removed {rows_removed_prices} rows with invalid price data")
         
         # Log data quality information
         rows_removed_prices = rows_before_price_check - len(df)
@@ -160,38 +241,157 @@ async def validate_csv_data(data: OptionData) -> pd.DataFrame:
         
         # Filter by reference date if provided
         if data.reference_date:
+            print(f"Filtering by reference date: {data.reference_date}")
+            
             try:
-                # Convert reference date to datetime with timezone info
-                reference_date = pd.to_datetime(data.reference_date).tz_localize('UTC')
+                # Print a sample of what we're dealing with
+                if len(df) > 0:
+                    print(f"Sample Last Trade Date before filtering: {df['Last Trade Date'].iloc[0]}")
                 
-                # Ensure Last Trade Date has timezone info for comparison
-                if df['Last Trade Date'].dt.tz is None:
-                    df['Last Trade Date'] = df['Last Trade Date'].dt.tz_localize('UTC')
+                # Convert all timestamps to datetime64[ns] without timezone info for comparison
+                df['Last_Trade_Date_Normalized'] = pd.to_datetime(df['Last Trade Date']).dt.tz_localize(None).dt.normalize()
                 
-                # Now filter with normalized timestamps
-                df = df[df['Last Trade Date'] <= reference_date]
+                # Parse reference date to datetime and normalize to date only
+                reference_date = pd.to_datetime(data.reference_date).normalize()
+                print(f"Normalized reference date: {reference_date}")
+                
+                # Filter based on date only (without timezone info)
+                df = df[df['Last_Trade_Date_Normalized'] <= reference_date]
+                
+                # Debug output
+                filtered_count = len(df)
+                print(f"After reference date filtering: {filtered_count} rows remain")
                 
                 if len(df) == 0:
+                    # Before raising an error, let's print some information for debugging
+                    all_dates = pd.to_datetime(df['Last Trade Date']).dt.tz_localize(None).dt.normalize().unique()
+                    print(f"Available dates in dataset: {all_dates}")
                     raise HTTPException(status_code=400, 
-                        detail=f"No data found for reference date '{data.reference_date}'")
-            except TypeError as e:
-                # Handle mixed timezone issue
-                print(f"Timezone comparison error: {str(e)}")
+                        detail=f"No data found for reference date '{data.reference_date}'. Check date format and timezone.")
+                        
+            except Exception as e:
+                print(f"Error during date filtering: {str(e)}")
                 
-                # Try converting both to naive timestamps
-                reference_date = pd.to_datetime(data.reference_date).tz_localize(None)
-                df['Last Trade Date'] = df['Last Trade Date'].dt.tz_localize(None)
-                
-                df = df[df['Last Trade Date'] <= reference_date]
-                if len(df) == 0:
+                # As a fallback, try a simple string comparison of just the date portion
+                try:
+                    # Extract just the date part as string from both sides
+                    ref_date_str = data.reference_date.split('T')[0]
+                    df['Trade_Date_Str'] = pd.to_datetime(df['Last Trade Date']).dt.strftime('%Y-%m-%d')
+                    
+                    # Filter using string comparison
+                    df = df[df['Trade_Date_Str'] <= ref_date_str]
+                    
+                    print(f"After fallback date filtering: {len(df)} rows remain")
+                    
+                    if len(df) == 0:
+                        raise HTTPException(status_code=400, 
+                            detail=f"No data found for reference date '{data.reference_date}' using string comparison")
+                except Exception as e2:
+                    print(f"String date comparison also failed: {str(e2)}")
                     raise HTTPException(status_code=400, 
-                        detail=f"No data found for reference date '{data.reference_date}'")
-        
+                        detail=f"Date filtering failed. Original error: {str(e)}. Fallback error: {str(e2)}")
+                                
         return df
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error parsing CSV data: {str(e)}")
+    
+# Add this class after the existing OptionData model in main.py
+
+class OptionDiagnosticsRequest(BaseModel):
+    """Model for option diagnostics request"""
+    csv_data: str = Field(..., description="CSV data containing option information")
+    price_type: str = Field(default="mid", description="Type of price to use (bid, ask, mid, last)")
+    reference_date: Optional[str] = Field(default=None, description="Reference date for option quotes (YYYY-MM-DD)")
+    spot: float = Field(..., description="Current spot price of the underlying")
+    discount_rates: Dict[str, float] = Field(..., description="Discount rates by date")
+    repo_rates: Dict[str, float] = Field(..., description="Repo rates by date")
+    dividends: Optional[Dict[str, float]] = Field(default=None, description="Dividend amounts by ex-date")
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "csv_data": "Expiry,Strike,Last Trade Date,Last Price,Bid,Ask,Option Type\n2025-03-21,100,2024-02-28,10.80,10.50,11.00,CALL",
+                    "price_type": "mid",
+                    "reference_date": "2024-02-28",
+                    "spot": 110.0,
+                    "discount_rates": {"2025-03-21": 0.05},
+                    "repo_rates": {"2025-03-21": 0.01},
+                    "dividends": {"2025-05-15": 1.5}
+                }
+            ]
+        }
+    }
+
+# Add this endpoint to main.py
+@app.post("/diagnostics", description="Get diagnostic information for option data")
+async def get_diagnostics(data: OptionDiagnosticsRequest = Body(...)):
+    """
+    Analyze option data and provide diagnostics on which options are included/excluded and why.
+    """
+    try:
+        # Parse and validate the CSV data
+        from io import StringIO
+        df = pd.read_csv(StringIO(data.csv_data))
+        
+        # Use the existing validation function
+        validator_data = OptionData(
+            csv_data=data.csv_data,
+            price_type=data.price_type,
+            reference_date=data.reference_date,
+            fitting_method='rbf',  # Default, not used for diagnostics
+            spot=data.spot,
+            discount_rates=data.discount_rates,
+            repo_rates=data.repo_rates,
+            dividends=data.dividends,
+            moneyness_grid=None,
+            time_grid=None
+        )
+        
+        df = await validate_csv_data(validator_data)
+        
+        # Create volatility surface calibrator
+        calibrator = VolSurfaceCalibrator(
+            df, 
+            price_type=data.price_type
+        )
+        
+        # Get diagnostics
+        diagnostics = calibrator.diagnose_options(
+            data.spot,
+            data.discount_rates,
+            data.repo_rates,
+            data.dividends
+        )
+        
+        # Calculate summary statistics
+        included_count = sum(1 for d in diagnostics if d["status"] == "Included")
+        total_count = len(diagnostics)
+        
+        # Final response
+        response = {
+            "diagnostics": diagnostics,
+            "summary": {
+                "total_options": total_count,
+                "included_options": included_count,
+                "excluded_options": total_count - included_count,
+                "inclusion_rate": round((included_count / total_count * 100), 2) if total_count > 0 else 0
+            }
+        }
+        
+        return response
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except ValueError as e:
+        # Handle ValueError (often from numerical issues)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Catch-all for any other errors
+        raise HTTPException(status_code=500, detail=f"Diagnostics error: {str(e)}")    
 
 @app.post("/calibrate_surface", description="Calibrate an arbitrage-free volatility surface from option data")
 async def calibrate_surface(data: OptionData = Body(...), df: pd.DataFrame = Depends(validate_csv_data)):
@@ -245,12 +445,79 @@ async def calibrate_surface(data: OptionData = Body(...), df: pd.DataFrame = Dep
         
         # Convert to Plotly format
         try:
-            plotly_json = calibrator.to_plotly_json(surface_data)
+            # Check if SVI method was successfully used
+            is_svi = data.fitting_method == 'svi' and 'svi_params' in surface_data
+            
+            if is_svi:
+                # Use special SVI visualization with enhanced grid
+                print("Using SVI-specific visualization")
+                plotly_json = calibrator.to_plotly_json_svi(surface_data)
+            else:
+                # Use standard visualization for RBF and other methods
+                plotly_json = calibrator.to_plotly_json(surface_data)
         except Exception as e:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Error generating Plotly visualization: {str(e)}"
-            )
+            # If visualization fails, log the error and try the standard method
+            print(f"Error in visualization: {str(e)}")
+
+            try:
+                # Use the enhanced visualization with better error handling and wider strike range
+                plotly_json = calibrator.to_plotly_json_enhanced(surface_data)
+                
+                # Verify valid JSON
+                json.loads(plotly_json)
+            except Exception as e:
+                print(f"Error generating visualization: {str(e)}")
+                # Fall back to the most basic visualization possible
+                try:
+                    # Extract raw points
+                    raw_points = surface_data.get('raw_points', {})
+                    if 'moneyness' in raw_points and 'time_to_expiry' in raw_points and 'implied_vol' in raw_points:
+                        moneyness = raw_points['moneyness']
+                        time_to_expiry = raw_points['time_to_expiry']
+                        implied_vol = raw_points['implied_vol']
+                        
+                        # Convert to days and percentage
+                        spot_price = data.spot
+                        time_days = [t * 365 for t in time_to_expiry]
+                        strikes = [m * spot_price for m in moneyness]
+                        vol_pct = [v * 100 for v in implied_vol]
+                        
+                        # Create simple scatter plot
+                        fallback_data = {
+                            'data': [
+                                {
+                                    'type': 'scatter3d',
+                                    'x': time_days,
+                                    'y': strikes,
+                                    'z': vol_pct,
+                                    'mode': 'markers',
+                                    'marker': {
+                                        'size': 5,
+                                        'color': vol_pct,
+                                        'colorscale': 'Viridis',
+                                        'opacity': 0.9
+                                    },
+                                    'name': 'Market Data'
+                                }
+                            ],
+                            'layout': {
+                                'title': 'Implied Volatility Data (Surface Generation Failed)',
+                                'scene': {
+                                    'xaxis': {'title': 'Time to Expiry (days)'},
+                                    'yaxis': {'title': 'Strike Price'},
+                                    'zaxis': {'title': 'Implied Volatility (%)'}
+                                }
+                            }
+                        }
+                        
+                        plotly_json = json.dumps(fallback_data)
+                    else:
+                        raise ValueError("Raw points data not available")
+                except Exception as fallback_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to create visualization. Original error: {str(e)}. Fallback error: {str(fallback_error)}"
+                    )
         
         # Add metadata to response
         response = {
@@ -300,6 +567,128 @@ async def calibrate_surface(data: OptionData = Body(...), df: pd.DataFrame = Dep
     except Exception as e:
         # Catch-all for any other errors
         raise HTTPException(status_code=500, detail=f"Calibration error: {str(e)}")
+
+# Add to your main.py file - additional logging to troubleshoot SVI issues
+
+@app.post("/debug_svi", description="Debug SVI parameterization issues")
+async def debug_svi(data: OptionData = Body(...), df: pd.DataFrame = Depends(validate_csv_data)):
+    """Debug SVI parameterization issues."""
+    try:
+        # Store initial data counts for quality metrics
+        initial_row_count = len(df)
+        
+        # Create volatility surface calibrator
+        calibrator = VolSurfaceCalibrator(
+            df, 
+            price_type=data.price_type,
+            moneyness_grid=data.moneyness_grid,
+            time_grid=data.time_grid
+        )
+        
+        # Calculate implied volatilities
+        try:
+            vol_df = calibrator.calculate_implied_vols(
+                data.spot,
+                data.discount_rates,
+                data.repo_rates,
+                data.dividends
+            )
+            
+            # Calculate metrics for data quality
+            valid_rows = len(vol_df)
+            invalid_vols = initial_row_count - valid_rows
+            
+            debug_result = {
+                "initial_count": initial_row_count,
+                "valid_count": valid_rows,
+                "invalid_count": invalid_vols,
+                "unique_expiries": len(vol_df['expiry'].unique()),
+                "points_per_expiry": {},
+                "moneyness_range": [float(vol_df['moneyness'].min()), float(vol_df['moneyness'].max())],
+                "implied_vol_range": [float(vol_df['implied_vol'].min()), float(vol_df['implied_vol'].max())],
+                "implied_vol_stats": {
+                    "mean": float(vol_df['implied_vol'].mean()),
+                    "std": float(vol_df['implied_vol'].std()),
+                    "median": float(vol_df['implied_vol'].median())
+                }
+            }
+            
+            # Count data points per expiry
+            for expiry in vol_df['expiry'].unique():
+                expiry_points = len(vol_df[vol_df['expiry'] == expiry])
+                debug_result["points_per_expiry"][str(expiry)] = expiry_points
+            
+            # Check SVI import
+            debug_result["svi_import_status"] = "Checking SVI import..."
+            
+            try:
+                # Add current directory to path if running as main script
+                import sys
+                import os
+                sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                
+                # Try to import SVI functions
+                try:
+                    from svi_implementation import (
+                        fit_svi_surface, 
+                        svi_to_surface_data
+                    )
+                    debug_result["svi_import_status"] = "SVI import successful"
+                except ImportError as e:
+                    debug_result["svi_import_status"] = f"SVI import failed: {str(e)}"
+                    
+                    # Check if the file exists
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    svi_file = os.path.join(current_dir, "svi_implementation.py")
+                    if os.path.exists(svi_file):
+                        debug_result["svi_file_exists"] = True
+                        with open(svi_file, 'r') as f:
+                            file_content = f.read()
+                            debug_result["svi_file_preview"] = file_content[:500] + "..." if len(file_content) > 500 else file_content
+                    else:
+                        debug_result["svi_file_exists"] = False
+                        debug_result["current_directory"] = current_dir
+            except Exception as e:
+                debug_result["svi_import_status"] = f"Error checking SVI import: {str(e)}"
+            
+            # Add more debug info about SVI fitting conditions
+            debug_result["svi_conditions"] = {
+                "enough_unique_expiries": len(vol_df['expiry'].unique()) >= 2,
+                "enough_points_per_expiry": all(count >= 3 for count in debug_result["points_per_expiry"].values()),
+                "method_requested": data.fitting_method == "svi"
+            }
+            
+            # If SVI is available, try a test fit with minimal data
+            if debug_result["svi_import_status"] == "SVI import successful":
+                try:
+                    from svi_implementation import fit_svi_slice
+                    
+                    # Create a simple test case
+                    test_log_moneyness = np.linspace(-0.2, 0.2, 5)
+                    test_total_var = np.array([0.04, 0.035, 0.03, 0.035, 0.04]) # Simple smile pattern
+                    
+                    # Try to fit
+                    test_result = fit_svi_slice(test_log_moneyness, test_total_var)
+                    debug_result["svi_test_fit"] = "Successful"
+                    debug_result["svi_test_params"] = test_result.tolist()
+                except Exception as e:
+                    debug_result["svi_test_fit"] = f"Failed: {str(e)}"
+            
+            return debug_result
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Error calculating implied volatilities: {str(e)}"
+            )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Catch-all for any other errors
+        raise HTTPException(status_code=500, detail=f"Debug error: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():

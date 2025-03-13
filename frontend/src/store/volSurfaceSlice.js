@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import axios from 'axios';
+import { fetchOptionDiagnostics } from './diagnosticSlice';
 
 // Use environment variables or default to API proxy
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -7,9 +8,13 @@ const API_URL = import.meta.env.VITE_API_URL || '/api';
 // Async thunk for calibrating vol surface
 export const calibrateVolSurface = createAsyncThunk(
   'volSurface/calibrate',
-  async (calibrationData, { rejectWithValue }) => {
+  async (calibrationData, { dispatch, rejectWithValue }) => {
     try {
       const response = await axios.post(`${API_URL}/calibrate_surface`, calibrationData);
+      
+      // After successful calibration, also fetch diagnostics
+      dispatch(fetchOptionDiagnostics(calibrationData));
+      
       return response.data;
     } catch (error) {
       return rejectWithValue(
@@ -29,6 +34,7 @@ const initialState = {
   },
   priceType: 'mid',
   referenceDate: new Date().toISOString().split('T')[0], // Today's date as default
+  fittingMethod: 'rbf',
   csvData: `Expiry,Strike,Last Trade Date,Last Price,Bid,Ask,Option Type
 2025-03-21,100,2024-02-28,10.80,10.50,11.00,CALL
 2025-03-21,110,2024-02-28,5.30,5.20,5.50,CALL
@@ -66,13 +72,19 @@ const volSurfaceSlice = createSlice({
       state.csvData = action.payload;
     },
     updateDiscountRates(state, action) {
-      state.marketData.discountRates = action.payload;
+      // Make sure we're not mutating the original object reference
+      state.marketData.discountRates = { ...action.payload };
+      console.log('Redux state updated with discount rates:', state.marketData.discountRates);
     },
     updateRepoRates(state, action) {
-      state.marketData.repoRates = action.payload;
+      // Make sure we're not mutating the original object reference
+      state.marketData.repoRates = { ...action.payload };
+      console.log('Redux state updated with repo rates:', state.marketData.repoRates);
     },
     updateDividends(state, action) {
-      state.marketData.dividends = action.payload;
+      // Make sure we're not mutating the original object reference
+      state.marketData.dividends = action.payload ? { ...action.payload } : {};
+      console.log('Redux state updated with dividends:', state.marketData.dividends);
     },
     resetCalibration(state) {
       state.surfaceData = null;

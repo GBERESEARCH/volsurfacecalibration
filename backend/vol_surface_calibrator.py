@@ -295,6 +295,7 @@ class VolSurfaceCalibrator:
         
         return self.options_df
     
+    # Add this at the beginning of the fit_surface method:
     def fit_surface(self, method='rbf'):
         """
         Fit the volatility surface
@@ -320,98 +321,241 @@ class VolSurfaceCalibrator:
         if len(moneyness) < 4:
             raise ValueError(f"Not enough valid data points for surface fitting. Found only {len(moneyness)} points.")
         
+        # Print detailed diagnostic info
+        print(f"\nFitting surface with method: {method}")
+        print(f"Data points available: {len(moneyness)}")
+        unique_expiries = np.unique(time_to_expiry)
+        print(f"Unique expiries: {len(unique_expiries)}")
+        for t in unique_expiries:
+            mask = np.isclose(time_to_expiry, t)
+            print(f"  Expiry {t:.6f} years: {np.sum(mask)} data points")
+        
         try:
             # Handle different fitting methods
             if method == 'svi':
                 # Use SVI parameterization
+                print("\nAttempting SVI parameterization...")
+                
                 try:
                     # Try to import locally first (for development)
                     import sys
                     import os
                     # Add current directory to path if running as main script
-                    if __name__ == "__main__":
-                        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
                     
                     # Import SVI functions
                     try:
                         from svi_implementation import (
                             fit_svi_surface, 
-                            svi_to_surface_data
+                            svi_to_surface_data,
+                            fit_svi_surface_direct    # Make sure this is imported too
                         )
-                    except ImportError:
+                        print("SVI implementation successfully imported")
+                    except ImportError as e:
                         # If still can't import, check if svi_implementation.py exists in current dir
                         current_dir = os.path.dirname(os.path.abspath(__file__))
                         svi_file = os.path.join(current_dir, "svi_implementation.py")
                         if os.path.exists(svi_file):
-                            raise ImportError(f"SVI implementation file exists at {svi_file} but cannot be imported.")
+                            raise ImportError(f"SVI implementation file exists at {svi_file} but cannot be imported: {str(e)}")
                         else:
-                            raise ImportError(f"SVI implementation file not found in {current_dir}.")
+                            raise ImportError(f"SVI implementation file not found in {current_dir}: {str(e)}")
+                        
                 except ImportError as e:
                     print(f"Error importing SVI implementation: {str(e)}")
                     print("Falling back to RBF interpolation.")
                     method = 'rbf'  # Fallback to RBF
                 
                 if method == 'svi':  # Only proceed if import was successful
-                    # Group data by expiry time
-                    unique_times = np.unique(time_to_expiry)
-                    unique_times.sort()  # Ensure times are in ascending order
-                    
-                    if len(unique_times) < 2:
-                        raise ValueError(f"SVI parameterization requires at least 2 expiry times. Found {len(unique_times)}.")
-                    
-                    # Create time grid based on unique expiry times
-                    time_grid = np.array(unique_times)
-                    
-                    # Create moneyness grid
-                    if self.moneyness_grid is None:
-                        min_moneyness = max(0.5, min(moneyness) * 0.9)
-                        max_moneyness = min(2.0, max(moneyness) * 1.1)
-                        self.moneyness_grid = np.linspace(min_moneyness, max_moneyness, 25)
-                    moneyness_grid = np.array(self.moneyness_grid)
-                    
-                    # Create a vol matrix for fitting
-                    interp_vol_matrix = np.zeros((len(time_grid), len(moneyness_grid)))
-                    
-                    # For each time slice, create an RBF interpolation to fill the moneyness grid
-                    for i, t in enumerate(time_grid):
-                        mask = np.isclose(time_to_expiry, t)
-                        if np.sum(mask) < 3:
-                            # Not enough points in this slice, use nearby points
-                            # Find closest time with enough points
-                            times_with_enough = [j for j, time in enumerate(time_grid) 
-                                                if np.sum(np.isclose(time_to_expiry, time)) >= 3]
-                            if not times_with_enough:
-                                raise ValueError("Not enough data points in any time slice for SVI fitting.")
-                            closest_time_idx = min(times_with_enough, key=lambda j: abs(time_grid[j] - t))
-                            t_mask = np.isclose(time_to_expiry, time_grid[closest_time_idx])
-                            t_moneyness = moneyness[t_mask]
-                            t_vols = implied_vol[t_mask]
-                        else:
-                            # Use points from this time slice
-                            t_moneyness = moneyness[mask]
-                            t_vols = implied_vol[mask]
+                    # First get the SVI parameters
+                    try:
+                        # Standard SVI fitting with interpolation
+                        # Group data by expiry time
+                        unique_times = np.unique(time_to_expiry)
+                        unique_times.sort()  # Ensure times are in ascending order
                         
-                        # Create RBF interpolation for this slice
-                        rbf = Rbf(t_moneyness, t_vols, function='linear')
-                        interp_vol_matrix[i] = rbf(moneyness_grid)
+                        print(f"Found {len(unique_times)} unique expiry times for SVI fitting")
+                        
+                        if len(unique_times) < 2:
+                            print(f"SVI parameterization requires at least 2 expiry times, but found {len(unique_times)}.")
+                            print("Falling back to RBF interpolation.")
+                            method = 'rbf'
+                        else:
+                            # Continue with SVI implementation
+                            # Create time grid based on unique expiry times
+                            time_grid = np.array(unique_times)
+                            
+                            # Create moneyness grid
+                            if self.moneyness_grid is None:
+                                min_moneyness = max(0.5, min(moneyness) * 0.9)
+                                max_moneyness = min(2.0, max(moneyness) * 1.1)
+                                print(f"Creating moneyness grid from {min_moneyness} to {max_moneyness}")
+                                self.moneyness_grid = np.linspace(min_moneyness, max_moneyness, 25)
+                            moneyness_grid = np.array(self.moneyness_grid)
+                            
+                            # For each time slice, interpolate to the moneyness grid
+                            interp_vol_matrix = np.zeros((len(time_grid), len(moneyness_grid)))
+                            
+                            # Check if we have enough points per slice
+                            enough_points_per_slice = True
+                            for i, t in enumerate(time_grid):
+                                mask = np.isclose(time_to_expiry, t)
+                                points_in_slice = np.sum(mask)
+                                print(f"Time slice {t:.6f} years: {points_in_slice} points")
+                                
+                                if points_in_slice < 3:
+                                    print(f"Not enough points for time slice {t:.6f} years. Need at least 3, found {points_in_slice}.")
+                                    enough_points_per_slice = False
+                            
+                            if not enough_points_per_slice:
+                                print("At least one time slice doesn't have enough points for SVI fitting.")
+                                print("Trying direct SVI fitting without interpolation...")
+                                
+                                try:
+                                    # Direct SVI fitting (bypass the problematic interpolation)
+                                    svi_params = fit_svi_surface_direct(moneyness, time_to_expiry, implied_vol)
+                                    print("Successfully fit SVI surface directly!")
+                                    
+                                    # Store SVI parameters for reference
+                                    svi_params_list = []
+                                    for params in svi_params:
+                                        # Handle different potential types of params
+                                        if hasattr(params, 'tolist'):
+                                            svi_params_list.append(params.tolist())
+                                        elif isinstance(params, tuple):
+                                            svi_params_list.append(list(params))
+                                        else:
+                                            svi_params_list.append(list(params))
+                                    
+                                except Exception as e:
+                                    print(f"Direct SVI fitting failed: {str(e)}")
+                                    print("Falling back to RBF interpolation.")
+                                    method = 'rbf'
+                                    # Exit the SVI section
+                                    
+                            else:
+                                # Interpolate each time slice
+                                for i, t in enumerate(time_grid):
+                                    mask = np.isclose(time_to_expiry, t)
+                                    t_moneyness = moneyness[mask]
+                                    t_vols = implied_vol[mask]
+                                    
+                                    print(f"Fitting time slice {t:.6f} years with {len(t_moneyness)} points")
+                                    
+                                    # Use robust interpolation for this slice
+                                    try:
+                                        interp_vol_matrix[i] = self.robust_slice_interpolation(t_moneyness, t_vols, moneyness_grid)
+                                        print(f"Successfully interpolated slice {t:.6f}")
+                                    except Exception as e:
+                                        print(f"Error interpolating slice {t:.6f}: {str(e)}")
+                                        raise ValueError(f"Cannot interpolate time slice {t:.6f} for SVI fitting: {str(e)}")
+                                
+                                # Fit SVI surface to the interpolated volatility matrix
+                                try:
+                                    svi_params = fit_svi_surface(moneyness_grid, time_grid, interp_vol_matrix)
+                                    print("Successfully fit SVI surface!")
+                                    
+                                    # Store SVI parameters for reference
+                                    svi_params_list = []
+                                    for params in svi_params:
+                                        # Handle different potential types of params
+                                        if hasattr(params, 'tolist'):
+                                            svi_params_list.append(params.tolist())
+                                        elif isinstance(params, tuple):
+                                            svi_params_list.append(list(params))
+                                        else:
+                                            svi_params_list.append(list(params))
+                                    
+                                except Exception as e:
+                                    print(f"SVI fitting failed: {str(e)}")
+                                    print("Falling back to RBF interpolation.")
+                                    method = 'rbf'
+                                    # Exit the SVI section
+                    except Exception as e:
+                        print(f"SVI preparation failed: {str(e)}")
+                        print("Falling back to RBF interpolation.")
+                        method = 'rbf'
+                        # Exit the SVI section
                     
-                    # Fit SVI surface to the interpolated volatility matrix
-                    svi_params = fit_svi_surface(moneyness_grid, time_grid, interp_vol_matrix)
+                    # If we're still in the SVI method, generate the surface data
+                    if method == 'svi':
+                        try:
+                            # Generate surface data
+                            surface_data = svi_to_surface_data(moneyness_grid, time_grid, svi_params)
+                            
+                            # Add SVI parameters to surface data
+                            surface_data['svi_params'] = svi_params_list
+                            
+                            # Add raw points for visualization
+                            surface_data['raw_points'] = {
+                                'moneyness': moneyness.tolist(),
+                                'time_to_expiry': time_to_expiry.tolist(),
+                                'implied_vol': implied_vol.tolist()
+                            }
+                            
+                            # Print summary of the surface
+                            print("\nSVI Surface Summary:")
+                            print(f"Time range: {min(time_grid):.4f} to {max(time_grid):.4f} years")
+                            print(f"Moneyness range: {min(moneyness_grid):.4f} to {max(moneyness_grid):.4f}")
+                            print(f"Surface grid: {len(surface_data['y'])} x {len(surface_data['x'])} points")
+                            print(f"Min volatility: {min([min(row) for row in surface_data['z']]):.4f}")
+                            print(f"Max volatility: {max([max(row) for row in surface_data['z']]):.4f}")
+                            
+                            return surface_data
+                            
+                        except Exception as e:
+                            print(f"SVI surface data generation failed: {str(e)}")
+                            print("Falling back to RBF interpolation.")
+                            method = 'rbf'    
+
+        except Exception as e:
+            print(f"Standard SVI fitting failed: {str(e)}")
+            print("Trying direct SVI fitting without interpolation...")
+            
+            try:
+                # Import direct fitting function
+                from svi_implementation import fit_svi_surface_direct, svi_to_surface_data
+                
+                # Fit SVI directly to scattered data
+                svi_params = fit_svi_surface_direct(moneyness, time_to_expiry, implied_vol)
+                print("Successfully fit SVI surface directly!")
+                
+                # Create moneyness grid if not provided
+                if self.moneyness_grid is None:
+                    min_moneyness = max(0.5, min(moneyness) * 0.9)
+                    max_moneyness = min(2.0, max(moneyness) * 1.1)
+                    self.moneyness_grid = np.linspace(min_moneyness, max_moneyness, 25)
+                
+                # Create time grid based on unique expiry times
+                time_grid = np.array(np.unique(time_to_expiry))
+                time_grid.sort()
                     
-                    # Convert SVI parameters to surface data
-                    surface_data = svi_to_surface_data(moneyness_grid, time_grid, svi_params)
-                    
-                    # Add raw points for visualization
-                    surface_data['raw_points'] = {
-                        'moneyness': moneyness.tolist(),
-                        'time_to_expiry': time_to_expiry.tolist(),
-                        'implied_vol': implied_vol.tolist()
-                    }
-                    
-                    # Add SVI parameters to surface data for reference
-                    surface_data['svi_params'] = [params.tolist() for params in svi_params]
-                    
-                    return surface_data
+                # Convert SVI parameters to surface data
+                surface_data = svi_to_surface_data(self.moneyness_grid, time_grid, svi_params)
+                
+                # Add raw points for visualization
+                surface_data['raw_points'] = {
+                    'moneyness': moneyness.tolist(),
+                    'time_to_expiry': time_to_expiry.tolist(),
+                    'implied_vol': implied_vol.tolist()
+                }
+                
+                # Add SVI parameters to surface data for reference
+                surface_data['svi_params'] = []
+                for params in svi_params:
+                    # Handle different potential types of params
+                    if hasattr(params, 'tolist'):
+                        surface_data['svi_params'].append(params.tolist())
+                    elif isinstance(params, tuple):
+                        surface_data['svi_params'].append(list(params))
+                    else:
+                        surface_data['svi_params'].append(list(params))
+                
+                return surface_data
+                
+            except Exception as e:
+                print(f"Direct SVI fitting also failed: {str(e)}")
+                print("Falling back to RBF interpolation.")
+                method = 'rbf'
             
             # If method is not SVI or SVI import failed, proceed with RBF
             if method == 'rbf':
@@ -531,6 +675,238 @@ class VolSurfaceCalibrator:
             
             return surface_data
     
+    # Add this method to the VolSurfaceCalibrator class in vol_surface_calibrator.py
+
+    def diagnose_options(self, spot, discount_rates, repo_rates, dividends=None):
+        """
+        Analyze options to identify which are included/excluded from calibration and why
+        
+        Parameters:
+        -----------
+        spot : float
+            Current spot price
+        discount_rates : dict
+            Dictionary mapping expiry dates to discount rates
+        repo_rates : dict
+            Dictionary mapping expiry dates to repo rates
+        dividends : dict or None
+            Dictionary mapping dividend dates to dividend amounts
+            
+        Returns:
+        --------
+        list
+            List of diagnostic records for each option
+        """
+        # Save original DataFrame before any filtering
+        original_df = self.options_df.copy()
+        
+        # Store spot price for use in visualization
+        self.spot_price = spot
+        
+        # Create standardized column names (lowercase)
+        column_mapping = {
+            'Expiry': 'expiry',
+            'Strike': 'strike',
+            'Option Type': 'option_type'
+        }
+        
+        # Create lowercase versions of required columns if they don't exist
+        for original_col, lowercase_col in column_mapping.items():
+            if original_col in original_df.columns and lowercase_col not in original_df.columns:
+                original_df[lowercase_col] = original_df[original_col]
+        
+        # Ensure option_type is lowercase for consistency
+        if 'option_type' in original_df.columns:
+            original_df['option_type'] = original_df['option_type'].str.lower()
+        
+        # Calculate forwards for diagnostics
+        forwards = self.calculate_forwards(spot, discount_rates, repo_rates, dividends)
+        
+        # Convert expiries to datetime if needed
+        if isinstance(next(iter(discount_rates.keys())), str):
+            discount_rates = {pd.to_datetime(k): v for k, v in discount_rates.items()}
+        
+        # Initialize diagnostic records
+        diagnostics = []
+        
+        # Process each option for diagnostics
+        for idx, row in original_df.iterrows():
+            diagnostic = {
+                "strike": float(row['strike']),
+                "expiry": row['expiry'],
+                "option_type": row['option_type'].lower(),
+                "price": float(row['option_price']) if 'option_price' in row else float(row.get('Mid', row.get('Bid', 0))),
+                "status": "Excluded",
+                "implied_vol": None,
+                "reason": ""
+            }
+            
+            # Add Black-Scholes inputs for reference
+            try:
+                # Calculate forward price for this expiry
+                expiry_datetime = pd.to_datetime(row['expiry'])
+                forward = forwards.get(expiry_datetime)
+                
+                if forward is None:
+                    diagnostic["reason"] = "Failed to calculate forward price"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Calculate time to expiry
+                time_to_expiry = (expiry_datetime - datetime.now()).total_seconds() / (365.25 * 24 * 60 * 60)
+                
+                if time_to_expiry <= 0:
+                    diagnostic["reason"] = "Option is expired"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Find discount rate for this expiry
+                discount_date = min(discount_rates.keys(), key=lambda x: abs((x - expiry_datetime).total_seconds()))
+                discount_rate = discount_rates[discount_date]
+                
+                # Check option price validity
+                option_price = diagnostic["price"]
+                if option_price <= 0:
+                    diagnostic["reason"] = "Invalid price (≤ 0)"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Check strike price validity
+                strike_price = diagnostic["strike"]
+                if strike_price <= 0:
+                    diagnostic["reason"] = "Invalid strike (≤ 0)"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Check moneyness is reasonable
+                moneyness = strike_price / forward
+                if moneyness < 0.1 or moneyness > 10:
+                    diagnostic["reason"] = f"Extreme moneyness ({moneyness:.2f})"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Check option type
+                option_type = diagnostic["option_type"]
+                if option_type not in ['call', 'put']:
+                    diagnostic["reason"] = f"Invalid option type: {option_type}"
+                    diagnostics.append(diagnostic)
+                    continue
+                    
+                # Check for arbitrage violations
+                if option_type == 'call':
+                    intrinsic = max(0, spot - strike_price)
+                    if option_price < intrinsic:
+                        diagnostic["reason"] = f"Call price below intrinsic value: {option_price} < {intrinsic}"
+                        diagnostics.append(diagnostic)
+                        continue
+                else:  # put
+                    intrinsic = max(0, strike_price - spot)
+                    if option_price < intrinsic:
+                        diagnostic["reason"] = f"Put price below intrinsic value: {option_price} < {intrinsic}"
+                        diagnostics.append(diagnostic)
+                        continue
+                        
+                # Try to calculate implied volatility
+                try:
+                    implied_vol = newton(
+                        self.implied_vol_objective, 
+                        x0=0.2,  # Initial guess
+                        args=(option_price, forward, strike_price, time_to_expiry, 
+                            discount_rate, 0, option_type)
+                    )
+                    
+                    # Sanity check the implied vol
+                    if 0.001 <= implied_vol <= 2.0:
+                        diagnostic["implied_vol"] = float(implied_vol)
+                        diagnostic["status"] = "Included"
+                    else:
+                        diagnostic["implied_vol"] = float(implied_vol)
+                        diagnostic["reason"] = f"Unreasonable volatility value: {implied_vol:.2%}"
+                except Exception as e:
+                    diagnostic["reason"] = f"IV calculation failed: {str(e)}"
+                    
+                diagnostics.append(diagnostic)
+                
+            except Exception as e:
+                diagnostic["reason"] = f"Error in diagnostic process: {str(e)}"
+                diagnostics.append(diagnostic)
+        
+        return diagnostics
+
+
+    def robust_slice_interpolation(self, x_data, y_data, x_grid):
+        """
+        Perform robust interpolation of a volatility slice, with multiple fallback methods.
+        
+        Parameters:
+        -----------
+        x_data : array-like
+            Moneyness values from market data
+        y_data : array-like
+            Implied volatility values from market data
+        x_grid : array-like
+            Target moneyness grid for interpolation
+            
+        Returns:
+        --------
+        array-like
+            Interpolated volatility values for the target grid
+        """
+        from scipy.interpolate import Rbf, interp1d, UnivariateSpline, griddata
+        import numpy as np
+        
+        # Try multiple interpolation methods with error handling
+        methods = [
+            # Method 1: RBF with different function types
+            lambda: Rbf(x_data, y_data, function='linear')(x_grid),
+            lambda: Rbf(x_data, y_data, function='multiquadric', epsilon=1.0)(x_grid),
+            lambda: Rbf(x_data, y_data, function='gaussian', epsilon=2.0)(x_grid),
+            
+            # Method 2: Linear interpolation with extrapolation
+            lambda: interp1d(x_data, y_data, bounds_error=False, fill_value='extrapolate')(x_grid),
+            
+            # Method 3: Cubic spline with smoothing
+            lambda: UnivariateSpline(x_data, y_data, k=3, s=0.1)(x_grid),
+            
+            # Method 4: Grid interpolation
+            lambda: griddata(x_data.reshape(-1, 1), y_data, x_grid.reshape(-1, 1), method='linear').flatten(),
+            lambda: griddata(x_data.reshape(-1, 1), y_data, x_grid.reshape(-1, 1), method='cubic').flatten(),
+            
+            # Method 5: Polynomial fit
+            lambda: np.polyval(np.polyfit(x_data, y_data, min(3, len(x_data)-1)), x_grid)
+        ]
+        
+        # Try each method until one works
+        last_error = None
+        for i, method in enumerate(methods):
+            try:
+                result = method()
+                
+                # Check if the result contains NaN or inf values
+                if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+                    raise ValueError(f"Method {i+1} produced NaN or inf values")
+                    
+                # Check for unreasonable volatility values
+                if np.any(result < 0.001) or np.any(result > 2.0):
+                    print(f"Warning: Method {i+1} produced values outside reasonable volatility range. Clamping.")
+                    result = np.clip(result, 0.001, 2.0)
+                    
+                print(f"Successfully interpolated using method {i+1}")
+                return result
+            except Exception as e:
+                last_error = e
+                print(f"Method {i+1} failed: {str(e)}")
+        
+        # If all methods fail, use nearest neighbor as last resort
+        print("All interpolation methods failed. Using nearest neighbor as last resort.")
+        result = np.zeros_like(x_grid)
+        for i, x in enumerate(x_grid):
+            # Find the nearest data point
+            nearest_idx = np.argmin(np.abs(x_data - x))
+            result[i] = y_data[nearest_idx]
+        
+        return result
+
     def to_plotly_json(self, surface_data=None):
         """
         Convert the volatility surface to Plotly-compatible JSON
@@ -579,7 +955,8 @@ class VolSurfaceCalibrator:
                     'x': time_in_days,
                     'y': strikes,
                     'z': z_values,
-                    'colorscale': 'Viridis',
+                    'colorscale': 'Blues',
+                    'opacity': 0.7, 
                     'showscale': True,
                     'colorbar': {
                         'title': 'Implied Vol (%)',
@@ -594,9 +971,9 @@ class VolSurfaceCalibrator:
                     'z': raw_points_vol,
                     'mode': 'markers',
                     'marker': {
-                        'size': 4,
+                        'size': 2,
                         'color': 'red',
-                        'opacity': 0.8
+                        'opacity': 0.9
                     },
                     'name': 'Market Data'
                 }
@@ -606,19 +983,423 @@ class VolSurfaceCalibrator:
                 'scene': {
                     'xaxis': {
                         'title': 'Time to Expiry (days)',
-                        'autorange': 'reversed'  # Reverse the axis
+                        'autorange': 'reversed',  # Reverse the axis
+                        'backgroundcolor': "rgb(200, 200, 230)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
                     },
                     'yaxis': {
-                        'title': 'Strike Price'
+                        'title': 'Strike Price',
+                        'backgroundcolor': "rgb(230, 200, 230)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
                     },
                     'zaxis': {
-                        'title': 'Implied Volatility (%)'
-                    }
+                        'title': 'Implied Volatility (%)',
+                        'backgroundcolor': "rgb(230, 230, 200)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
+                    },
+                    'aspectmode': 'cube'
                 }
             }
         }
         
         return json.dumps(plotly_data)
+    
+    # Add this function to your vol_surface_calibrator.py to better handle SVI visualization
+
+    def to_plotly_json_svi(self, surface_data=None):
+        """
+        Special version of to_plotly_json specifically for SVI surfaces
+        that ensures proper grid coverage and visualization
+        
+        Parameters:
+        -----------
+        surface_data : dict or None
+            Volatility surface data from SVI fitting
+            
+        Returns:
+        --------
+        str
+            JSON string for Plotly
+        """
+        if surface_data is None:
+            raise ValueError("surface_data is required for SVI visualization")
+        
+        # Extract key data
+        time_grid = np.array(surface_data['x'])
+        moneyness_grid = np.array(surface_data['y'])
+        vol_matrix = np.array(surface_data['z'])
+        raw_points = surface_data['raw_points']
+        
+        # Create a wider & denser moneyness grid to properly show the surface
+        # This is especially important for SVI which has good extrapolation properties
+        min_moneyness = min(0.7, min(moneyness_grid) * 0.9)
+        max_moneyness = max(1.3, max(moneyness_grid) * 1.1)
+        dense_moneyness_grid = np.linspace(min_moneyness, max_moneyness, 100)
+        
+        # Print diagnostics
+        print(f"Original moneyness grid: {min(moneyness_grid)} to {max(moneyness_grid)}")
+        print(f"Enhanced moneyness grid: {min_moneyness} to {max_moneyness}")
+        
+        # Create a denser time grid too
+        min_time = min(time_grid)
+        max_time = max(time_grid)
+        dense_time_grid = np.linspace(min_time, max_time, 100)
+        
+        # Make new grids
+        X, Y = np.meshgrid(dense_time_grid, dense_moneyness_grid)
+        
+        # Get SVI parameters if available
+        svi_params = surface_data.get('svi_params', None)
+        
+        if svi_params:
+            # If we have SVI parameters, regenerate the surface with denser grid
+            print("Regenerating surface with SVI parameters and denser grid")
+            try:
+                from svi_implementation import svi_surface_to_vol_matrix
+                
+                # Process SVI parameters to ensure correct format
+                processed_params = []
+                for params in svi_params:
+                    if isinstance(params, list):
+                        processed_params.append(np.array(params))
+                    else:
+                        processed_params.append(params)
+                
+                # Interpolate SVI parameters for the dense time grid
+                from scipy.interpolate import interp1d
+                
+                # For each SVI parameter, create an interpolation function across time
+                param_interp_funcs = []
+                for i in range(5):  # 5 SVI parameters (a, b, rho, m, sigma)
+                    param_values = [p[i] for p in processed_params]
+                    
+                    # Create interpolation function (with constant extrapolation)
+                    interp_func = interp1d(
+                        time_grid, param_values, 
+                        kind='linear', 
+                        bounds_error=False,
+                        fill_value=(param_values[0], param_values[-1])
+                    )
+                    param_interp_funcs.append(interp_func)
+                
+                # Generate dense SVI parameters
+                dense_svi_params = []
+                for t in dense_time_grid:
+                    params = [f(t) for f in param_interp_funcs]
+                    dense_svi_params.append(np.array(params))
+                
+                # Generate volatility surface with dense grid
+                log_moneyness_grid = np.log(dense_moneyness_grid)
+                vol_matrix = svi_surface_to_vol_matrix(log_moneyness_grid, dense_time_grid, dense_svi_params)
+                
+                # Safety check for NaN or Inf values
+                vol_matrix = np.nan_to_num(vol_matrix, nan=0.2, posinf=2.0, neginf=0.001)
+                vol_matrix = np.clip(vol_matrix, 0.001, 2.0)
+                
+                # Update grid dimensions
+                X, Y = np.meshgrid(dense_time_grid, dense_moneyness_grid)
+                
+            except Exception as e:
+                print(f"Error regenerating SVI surface: {str(e)}")
+                print("Proceeding with original grid")
+        
+        # Format for Plotly - similar to the original to_plotly_json method
+        
+        # Convert time to days and reverse the axis
+        time_in_days = [t * 365 for t in dense_time_grid]
+        time_in_days.reverse()  # Reverse the time axis
+        
+        # Convert z values (volatility) to percentage
+        z_values = [[vol * 100 for vol in row] for row in vol_matrix.T]  # Note the transpose here
+        
+        # Reverse each row of z to match the reversed x axis
+        z_values = [row[::-1] for row in z_values]
+        
+        # Calculate actual strike prices using moneyness and spot price
+        spot_price = getattr(self, 'spot_price', 100.0)  # Default to 100 if not set
+        
+        # Calculate actual strikes from moneyness grid
+        strikes = [m * spot_price for m in dense_moneyness_grid]
+        
+        # Raw points with converted values
+        raw_points_time = [t * 365 for t in raw_points['time_to_expiry']]
+        raw_points_strikes = [m * spot_price for m in raw_points['moneyness']]
+        raw_points_vol = [vol * 100 for vol in raw_points['implied_vol']]
+        
+        plotly_data = {
+            'data': [
+                {
+                    'type': 'surface',
+                    'x': time_in_days,
+                    'y': strikes,
+                    'z': z_values,
+                    'colorscale': 'Blues',  # Changed from Viridis to Blues
+                    'opacity': 0.7,         # Added opacity
+                    'showscale': True,
+                    'colorbar': {
+                        'title': 'Implied Vol (%)',
+                        'titleside': 'right'
+                    },
+                    'name': 'Vol Surface'
+                },
+                {
+                    'type': 'scatter3d',
+                    'x': raw_points_time,
+                    'y': raw_points_strikes,
+                    'z': raw_points_vol,
+                    'mode': 'markers',
+                    'marker': {
+                        'size': 2,
+                        'color': 'red',
+                        'opacity': 0.9
+                    },
+                    'name': 'Market Data'
+                }
+            ],
+            'layout': {
+                'title': 'SVI Implied Volatility Surface',
+                'scene': {
+                    'xaxis': {
+                        'title': 'Time to Expiry (days)',
+                        'autorange': 'reversed',  # Reverse the axis
+                        'backgroundcolor': "rgb(200, 200, 230)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
+                    },
+                    'yaxis': {
+                        'title': 'Strike Price',
+                        'backgroundcolor': "rgb(230, 200, 230)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
+                    },
+                    'zaxis': {
+                        'title': 'Implied Volatility (%)',
+                        'backgroundcolor': "rgb(230, 230, 200)",
+                        'gridcolor': "white",
+                        'showbackground': True,
+                        'zerolinecolor': "white"
+                    },
+                    'aspectmode': 'cube'
+                }
+            }
+        }
+        
+        return json.dumps(plotly_data)
+    
+    # Let's create a simpler, more reliable approach to the SVI visualization
+    # Add this method to vol_surface_calibrator.py
+
+    def to_plotly_json_enhanced(self, surface_data=None):
+        """
+        Enhanced version of to_plotly_json with improved error handling
+        and better handling of strike price range
+        
+        Parameters:
+        -----------
+        surface_data : dict or None
+            Volatility surface data, if None, fit_surface() will be called
+            
+        Returns:
+        --------
+        str
+            JSON string for Plotly
+        """
+        if surface_data is None:
+            raise ValueError("surface_data is required")
+        
+        import numpy as np
+        import json
+        from scipy.interpolate import griddata
+        
+        try:
+            # Extract data
+            time_grid = np.array(surface_data['x'])
+            moneyness_grid = np.array(surface_data['y'])
+            vol_matrix = np.array(surface_data['z'])
+            raw_points = surface_data['raw_points']
+            
+            # Create a wider moneyness grid to show more strikes
+            spot_price = getattr(self, 'spot_price', 100.0)
+            min_moneyness = 0.5  # Show strikes down to 50% of spot
+            max_moneyness = 2.0  # Show strikes up to 200% of spot
+            
+            # Create denser grids for better visualization
+            dense_moneyness_grid = np.linspace(min_moneyness, max_moneyness, 100)
+            dense_time_grid = np.linspace(min(time_grid), max(time_grid), 100)
+            
+            # Convert to actual strike prices
+            dense_strikes = dense_moneyness_grid * spot_price
+            
+            # Create new coordinate grid
+            X, Y = np.meshgrid(dense_time_grid, dense_moneyness_grid)
+            
+            # Interpolate the volatility surface to the new grid
+            # First create a grid of the original points
+            orig_X, orig_Y = np.meshgrid(time_grid, moneyness_grid)
+            
+            # Reshape for griddata
+            points = np.column_stack([orig_X.flatten(), orig_Y.flatten()])
+            values = vol_matrix.flatten()
+            
+            # Create target grid
+            xi = np.column_stack([X.flatten(), Y.flatten()])
+            
+            # Interpolate
+            interpolated = griddata(points, values, xi, method='linear')
+            
+            # Handle NaN values if any
+            mask = np.isnan(interpolated)
+            if np.any(mask):
+                interpolated[mask] = griddata(points, values, xi[mask], method='nearest')
+            
+            # Reshape to grid
+            Z = interpolated.reshape(X.shape)
+            
+            # Clip to reasonable volatility range
+            Z = np.clip(Z, 0.001, 2.0)
+            
+            # Format for Plotly
+            
+            # Convert time to days and reverse the axis for Plotly
+            time_in_days = [t * 365 for t in dense_time_grid]
+            time_in_days.reverse()  # Reverse for visualization
+            
+            # Convert volatility to percentage
+            dense_z_values = [[vol * 100 for vol in row] for row in Z.T]  # Transpose for Plotly
+            
+            # Reverse each row of z to match the reversed x axis
+            dense_z_values = [row[::-1] for row in dense_z_values]
+            
+            # Raw points with converted values
+            raw_points_time = [t * 365 for t in raw_points['time_to_expiry']]
+            raw_points_strikes = [m * spot_price for m in raw_points['moneyness']]
+            raw_points_vol = [vol * 100 for vol in raw_points['implied_vol']]
+            
+            # Create plot data
+            plotly_data = {
+                'data': [
+                    {
+                        'type': 'surface',
+                        'x': time_in_days,
+                        'y': dense_strikes.tolist(),  # Actual strike prices
+                        'z': dense_z_values,
+                        'colorscale': 'Blues',  # Changed from Viridis to Blues
+                        'opacity': 0.7,         # Added opacity
+                        'showscale': True,
+                        'colorbar': {
+                            'title': 'Implied Vol (%)',
+                            'titleside': 'right'
+                        },
+                        'name': 'Vol Surface'
+                    },
+                    {
+                        'type': 'scatter3d',
+                        'x': raw_points_time,
+                        'y': raw_points_strikes,
+                        'z': raw_points_vol,
+                        'mode': 'markers',
+                        'marker': {
+                            'size': 2,           # Changed from 4/5 to 2
+                            'color': 'red',      
+                            'opacity': 0.9       # Changed from 0.8 to 0.9
+                        },
+                        'name': 'Market Data'
+                    }
+                ],
+                'layout': {
+                    'title': 'Implied Volatility Surface',
+                    'scene': {
+                        'xaxis': {
+                            'title': 'Time to Expiry (days)',
+                            'autorange': 'reversed',  # Reverse the axis
+                            'backgroundcolor': "rgb(200, 200, 230)",
+                            'gridcolor': "white",
+                            'showbackground': True,
+                            'zerolinecolor': "white"
+                        },
+                        'yaxis': {
+                            'title': 'Strike Price',
+                            'backgroundcolor': "rgb(230, 200, 230)",
+                            'gridcolor': "white",
+                            'showbackground': True,
+                            'zerolinecolor': "white"
+                        },
+                        'zaxis': {
+                            'title': 'Implied Volatility (%)',
+                            'backgroundcolor': "rgb(230, 230, 200)",
+                            'gridcolor': "white",
+                            'showbackground': True,
+                            'zerolinecolor': "white"
+                        },
+                        'aspectmode': 'cube'
+                    }
+                }
+            }
+            
+            return json.dumps(plotly_data)
+            
+        except Exception as e:
+            # If all else fails, create a simple scatter plot of the raw data
+            try:
+                # Raw points
+                raw_points = surface_data['raw_points']
+                raw_points_time = [t * 365 for t in raw_points['time_to_expiry']]
+                raw_points_strikes = [m * getattr(self, 'spot_price', 100.0) for m in raw_points['moneyness']]
+                raw_points_vol = [vol * 100 for vol in raw_points['implied_vol']]
+                
+                # Simple scatter plot
+                fallback_data = {
+                    'data': [
+                        {
+                            'type': 'scatter3d',
+                            'x': raw_points_time,
+                            'y': raw_points_strikes,
+                            'z': raw_points_vol,
+                            'mode': 'markers',
+                            'marker': {
+                                'size': 5,
+                                'color': raw_points_vol,
+                                'colorscale': 'Viridis',
+                                'opacity': 0.9,
+                                'showscale': True,
+                                'colorbar': {
+                                    'title': 'Implied Vol (%)',
+                                    'titleside': 'right'
+                                }
+                            },
+                            'name': 'Market Data'
+                        }
+                    ],
+                    'layout': {
+                        'title': 'Implied Volatility Data (Surface Generation Failed)',
+                        'scene': {
+                            'xaxis': {
+                                'title': 'Time to Expiry (days)',
+                            },
+                            'yaxis': {
+                                'title': 'Strike Price'
+                            },
+                            'zaxis': {
+                                'title': 'Implied Volatility (%)'
+                            }
+                        }
+                    }
+                }
+                
+                return json.dumps(fallback_data)
+                
+            except Exception as fallback_error:
+                # Really failed - return error message
+                raise ValueError(f"Failed to create visualization: {str(e)}. Fallback error: {str(fallback_error)}")    
+
 
 # Example usage
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ const MarketDataForm = ({
           Only include options with 'Last Trade Date' on or before this date
         </p>
       </div>
-      
+            
       <div className="form-group">
         <label className="form-label">Surface Fitting Method</label>
         <select
@@ -67,9 +67,25 @@ const MarketDataForm = ({
           <option value="rbf">RBF Interpolation</option>
           <option value="svi">SVI Parameterization</option>
         </select>
-        <p className="form-help">
-          SVI (Stochastic Volatility Inspired) provides a theoretically sound parameterization with no-arbitrage constraints
-        </p>
+        {fittingMethod === 'svi' ? (
+          <div className="form-help">
+            <p>
+              SVI (Stochastic Volatility Inspired) provides a theoretically sound parameterization with no-arbitrage constraints
+            </p>
+            <div className="svi-requirements">
+              <strong>Requirements for SVI to work:</strong>
+              <ul>
+                <li>At least 2 different expiry dates in your data</li>
+                <li>At least 3 options per expiry date</li>
+                <li>Good spread of strikes for each expiry</li>
+              </ul>
+            </div>
+          </div>
+        ) : (
+          <p className="form-help">
+            RBF (Radial Basis Function) provides a flexible interpolation suitable for sparse or irregularly spaced data
+          </p>
+        )}
       </div>
     </div>
   );
